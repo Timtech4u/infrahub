@@ -57,8 +57,14 @@ Fix anyway, for two reasons:
 authorization: `Bearer ${newToken.access_token}`,
 ```
 
-Add an E2E test that exercises the TOKEN_EXPIRED retry path **with cookies
-disabled** so the header is the only thing authenticating the replay.
+Add an E2E test that exercises the TOKEN_EXPIRED retry path with the
+`access_token` cookie removed so the header is the only thing
+authenticating the replay. Concretely in Playwright: after login, call
+`context.clearCookies({ name: "access_token" })` (or filter by domain),
+then force a `TOKEN_EXPIRED` and assert the replayed request succeeds —
+which can only happen if the `Bearer ` prefix is correct. Wholesale
+cookie disabling via context options is not what we want; the cookie has
+to exist for the *login* but not for the *replay*.
 
 ### E2 — Cap the silent-refresh retry
 
@@ -104,6 +110,14 @@ if (result.errors) {
 ```
 
 …and type the `errors` state as `RestErrorItem[] | null` instead of `any`.
+
+Note on naming: `FetchError(200, …)` reads oddly since a 2xx isn't a fetch
+failure. We're keeping the name anyway — `FetchError` is already the typed
+wrapper for "the server's REST envelope contained `errors`", and the
+status code distinguishes the two cases at the catch site. Renaming to
+something like `RestEnvelopeError` would ripple through every fetch
+caller for no real ergonomic gain. Add a one-line comment on the class
+declaration noting that `status` may be 2xx when `errors` is present.
 
 ### E4 — Tighten the `RestErrorItem.extensions.code` type
 
@@ -195,6 +209,15 @@ the caller (`retryWithRefreshedToken` and `useAuth`) decide whether to redirect.
 Side-benefit: it stops the double-redirect that currently happens when both
 errorLink AND `refreshAccessToken` think it's their job to navigate.
 
+**Caller responsibility — make this explicit.** Once `refreshAccessToken`
+throws, `retryWithRefreshedToken`'s `.catch` currently just calls
+`observer.error(err)`, which surfaces as an Apollo network error and does
+**not** re-run the errorLink. So nobody redirects unless we add it. PR 2
+must update `retryWithRefreshedToken`'s catch to call
+`logoutLocally({ reason: "refresh-failed" })` (see A3) before propagating
+the error to the observer. Without this, A1 alone would silently strand
+the user on the original page with no auth.
+
 ### A2 — `redirectToLogin()` loses the `from` location
 
 **Where:** `graphqlClientApollo.tsx:147` (`window.location.assign("/login")`).
@@ -218,9 +241,39 @@ window.location.assign(`/login?from=${encodeURIComponent(from)}`);
 refresh flow, the logout flow, the auth hook). Each call site has a slightly
 different idea of what "log the user out" means (clear tokens, clear React
 Query cache, redirect, reload). Consolidate behind a single
-`logoutLocally({ redirect?: boolean, reason?: "expired" | "manual" | "refresh-failed" })`
-helper and replace the four ad-hoc call sites. Same payoff as A1: one place
-that decides what happens.
+`logoutLocally({ reason })` helper and replace the four ad-hoc call sites.
+Same payoff as A1: one place that decides what happens.
+
+`reason` is the only parameter — it drives the redirect decision so the
+two cannot drift. The mapping is explicit:
+
+| `reason`           | Redirect                                                          | Used by                          |
+| ------------------ | ----------------------------------------------------------------- | -------------------------------- |
+| `"expired"`        | `/login?from=<current-path>` (encoded per A2)                     | errorLink `AUTHENTICATION_REQUIRED` |
+| `"refresh-failed"` | `/login?from=<current-path>`                                      | `retryWithRefreshedToken` catch (A1) |
+| `"manual"`         | `/login` (no `from` — user chose to log out)                       | logout flow, `useAuth.setToken(null)` |
+| `"silent"`         | none — clears tokens only, caller handles navigation              | tests, programmatic teardown     |
+
+Implementation sketch:
+
+```ts
+export function logoutLocally({ reason }: { reason: LogoutReason }) {
+  removeTokensInLocalStorage();
+  queryClient.clear(); // currently only some call sites do this
+  if (reason === "silent") return;
+  if (window.location.pathname === "/login") return;
+  const target = reason === "manual"
+    ? "/login"
+    : `/login?from=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+  window.location.assign(target);
+}
+```
+
+Note: dropping the `redirect: boolean` parameter is deliberate. An earlier
+draft made redirect independent of reason, but in practice `reason` already
+implies the redirect — making them separate just invited drift between call
+sites. `"silent"` is the explicit escape hatch when a caller really needs
+to suppress the navigation.
 
 ### A4 — `authLink` reads `localStorage` synchronously on every request
 
@@ -300,9 +353,13 @@ the same files in three PRs.
   `throw new FetchError(200, result.errors)` so the catch sees one shape.
 
 Files touched: `graphqlClientApollo.tsx`, `pages/login.tsx`,
-`pages/auth-callback.tsx`. Tests: extend `errors.test.ts`; new E2E spec for
-expired-token mid-session (lands on `/login?from=…`, returns to original
-route after re-login).
+`pages/auth-callback.tsx`. Tests:
+- Extend `errors.test.ts` with the `RestErrorItem` typing assertions.
+- New unit test on `errorLink`: two consecutive `TOKEN_EXPIRED` responses
+  in the same operation → second one short-circuits to `redirectToLogin()`
+  instead of looping (covers E2).
+- New E2E spec for expired-token mid-session: lands on `/login?from=…`,
+  returns to original route after re-login (covers E1 + A2).
 
 ### PR 2 — Consolidate auth side-effects (HIGH priority)
 
