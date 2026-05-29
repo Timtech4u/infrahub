@@ -249,16 +249,108 @@ trivial once A6 is in.
 
 ---
 
-## Suggested ordering
+## PR split plan
 
-1. **E2** (retry cap) — guards against an infinite TOKEN_EXPIRED loop. Highest
-   real risk in current code.
-2. **E1** (Bearer prefix) — single-line cleanup; not a correctness bug today
-   thanks to the cookie fallback, but the dead header invites future
-   regressions.
-3. **A1 + A3** (consolidate auth side-effects) — clears the conceptual mess
-   before US2 layers more on top.
-4. **A2** (preserve `from`) — UX win that becomes user-visible the moment a
-   token expires mid-session.
-5. **E6** (catalogue snapshot test) — prevents drift before US2 ships.
-6. Everything else — opportunistic.
+Bundled by theme so each PR is a single conceptual change. Items are listed by
+ID — refer to the sections above for detail.
+
+### PR 1 — Token-expiry resilience (HIGH priority)
+
+**Why bundle:** every item here is on the "what happens when an access token
+dies mid-session" code path. Reviewing them together is cheaper than touching
+the same files in three PRs.
+
+- **E2** — Cap the silent-refresh retry. Stops the infinite
+  TOKEN_EXPIRED → refresh → TOKEN_EXPIRED loop.
+- **E1** — Drop the misleading `authorization: newToken.access_token`; use
+  `` `Bearer ${newToken.access_token}` ``. Dead-code cleanup, but we're
+  already editing the same function.
+- **A2** — `redirectToLogin()` encodes the current path as `?from=...`;
+  `LoginPage` consumes it as a fallback when `location.state?.from` is absent
+  (which it is after a hard nav).
+- **A6** — Type `login.tsx` errors as `RestErrorItem`, drop the duplicate
+  inline shape.
+- **E3** — Normalise the 2xx-with-errors branch in `auth-callback.tsx` to
+  `throw new FetchError(200, result.errors)` so the catch sees one shape.
+
+Files touched: `graphqlClientApollo.tsx`, `pages/login.tsx`,
+`pages/auth-callback.tsx`. Tests: extend `errors.test.ts`; new E2E spec for
+expired-token mid-session (lands on `/login?from=…`, returns to original
+route after re-login).
+
+### PR 2 — Consolidate auth side-effects (HIGH priority)
+
+**Why bundle:** `removeTokensInLocalStorage` has four callers today, each
+with a slightly different idea of what "log out" means. Pulling them behind
+one helper is a single conceptual change, even if it touches several files.
+
+- **A1** — `refreshAccessToken` throws instead of calling
+  `window.location.reload()`. Caller decides what to do.
+- **A3** — Introduce `logoutLocally({ redirect?, reason? })`. Replace the
+  four ad-hoc call sites (`errorLink`, `refresh-access-token`, `logout`,
+  `useAuth`).
+- **A7** — Wire a `storage` event listener in `useAuth` so a logout in one
+  tab clears state in the others. Naturally lives in the same boundary as
+  A3.
+
+Files touched: `entities/authentication/{domain,ui,utils}/*`,
+`graphqlClientApollo.tsx`. Tests: unit tests for `logoutLocally`; component
+test for `useAuth` `storage`-event reconciliation.
+
+### PR 3 — Catalogue drift safety net (MEDIUM, before US2)
+
+**Why bundle:** both items defend the hand-written mirror until US2 replaces
+it.
+
+- **E6** — Backend pytest that snapshots `(code, payload field names)` to a
+  JSON file. Frontend `errors.test.ts` reads the same JSON and asserts the
+  mirror matches. Catches drift loudly on either side.
+- **E4** — Add a header comment on `RestErrorItem` explaining the REST/GraphQL
+  envelope split and pointing at the catalogue mirror, so future readers
+  don't conflate the two `code` shapes.
+
+Files touched: `backend/tests/unit/errors/test_catalogue_snapshot.py` (new),
+`backend/infrahub/errors/_snapshot.json` (or equivalent),
+`frontend/app/src/shared/api/rest/fetch.ts`,
+`frontend/app/src/shared/api/graphql/errors.test.ts`.
+
+### PR 4 — Catalogue visibility & UX polish (LOW–MEDIUM)
+
+**Why bundle:** all three improve what the user/engineer *sees* when an
+error fires; touching `errorLink` and `login.tsx` once is cheaper than twice.
+
+- **E7** — Dev-build banner + `console.warn` for `UNDEFINED_ERROR` so
+  catalogue gaps are visible during development. Gated on
+  `import.meta.env.DEV`.
+- **E8** — Forward `UNDEFINED_ERROR` occurrences to whatever telemetry sink
+  exists (or stash in `localStorage` during dev) so we can quantify
+  catalogue coverage over time.
+- **A8** — When `RestErrorItem.extensions.code` is present, render it
+  alongside the message on the login page so SSO failures are
+  self-diagnosable.
+
+Depends on A6 (PR 1) for the typed login error shape.
+
+### PR 5 — Micro-optimisations (OPPORTUNISTIC)
+
+**Why bundle:** unrelated to the catalogue work, both tiny, neither blocks
+anything else.
+
+- **A4** — Cache the access token at module scope in `authLink`; refresh it
+  via the `storage` event added in A7 and via `useAuth.setToken`. Avoids a
+  synchronous `localStorage` read per Apollo operation.
+- **A5** — Stabilise the SSO callback `useEffect` deps in
+  `auth-callback.tsx` so a config refetch doesn't re-run the token
+  exchange.
+
+### Out of scope here — track in US2
+
+- **E5** — Delete the hand-written catalogue mirror. Belongs to US2 (T027–T030)
+  task list; add a CI check that fails if both `errors.ts` and the generated
+  module coexist.
+
+### Suggested merge order
+
+PR 1 → PR 2 → PR 3 → PR 4 → PR 5. PR 1 and PR 2 are independent and can be
+opened in parallel; the rest depend on PR 1's types (`RestErrorItem` usage)
+or on landing before US2.
