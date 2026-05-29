@@ -139,16 +139,6 @@ generates the bindings. Add a tracking item in US2's tasks.md and a CI check
 that fails if both `errors.ts` and the generated module coexist after that
 point.
 
-### E6 — Add a backend pytest that snapshots the catalogue codes + field names
-
-**Where:** `backend/tests/unit/errors/test_catalogue_snapshot.py` (new).
-
-Until US2 lands, the only protection against frontend/backend drift is human
-diligence. A snapshot test that asserts the JSON-serialised catalogue (codes
-and payload field names) matches a checked-in file gives us a noisy failure
-on the backend when a payload model gains/loses a field. The frontend can
-read the same snapshot in `errors.test.ts` to assert parity locally.
-
 ### E7 — Surface a typed alert message for `UNDEFINED_ERROR`
 
 **Where:** `graphqlClientApollo.tsx` → `notifyUser`.
@@ -166,9 +156,7 @@ message) rather than silently toasted as a generic error. Gate it on
 of US2's frontend bindings sequence (T027 → T028 → T029 → T030) and is
 self-contained tooling work — no behaviour change, no consumer code
 touched. Pulling it forward into this backlog unblocks the rest of the
-US2 frontend chain without waiting for the full US2 PR to be assembled,
-and gives PR 3 (catalogue drift safety net) a concrete next step beyond
-the snapshot test.
+US2 frontend chain without waiting for the full US2 PR to be assembled.
 
 T027 verbatim: *Add `json-schema-to-typescript` to `frontend/app/package.json`
 `devDependencies` and register pnpm scripts `generate:error-bindings` and
@@ -187,34 +175,31 @@ spec's PR number.
 **Where:** would live in `graphqlClientApollo.tsx` → `errorLink`.
 
 **Status: not actionable in isolation.** The frontend has no telemetry SDK
-today (no Sentry / PostHog / Datadog / Segment in `package.json` or `src/`)
-and `INFP-471` ("local telemetry storage") is a *backend* daily-snapshot
-pipeline, not a browser-event sink — it does not solve this.
+today (no Sentry / PostHog / Datadog / Segment in `package.json` or `src/`),
+so there is no sink to emit catalogue-gap events to.
 
 To make E8 real, we first need a decision on:
 
-1. **Sink.** Self-hosted (write to a backend `/api/telemetry/event`
-   endpoint), third-party SaaS (Sentry, PostHog), or no remote sink at all
-   (in-app counter surfaced on an admin diagnostic page). Each implies
+1. **Sink.** Third-party SaaS (Sentry, PostHog), self-hosted endpoint, or
+   in-app counter surfaced on an admin diagnostic page. Each implies
    different opt-out, on-prem / air-gapped, and dependency tradeoffs.
 2. **Event schema.** Minimum: `{ code, http_status, operation_name, path,
    timestamp, deployment_id }`. No personally-identifying request body
    content; the catalogue `data` payloads should be allow-listed per code
    before being attached.
-3. **Opt-out + air-gap behaviour.** Must respect the same opt-out toggle
-   `INFP-471` uses on the backend, and must no-op silently when the network
-   is unreachable.
+3. **Opt-out + air-gap behaviour.** Must no-op silently when the network
+   is unreachable, and respect a user opt-out toggle.
 4. **Volume control.** Bucket by `(code, operation_name)` and rate-limit
    per session — `UNDEFINED_ERROR` could easily fire hundreds of times in a
    loop before the user notices.
 
-**Scope it as its own spec** (e.g. `infp-XXX-frontend-error-telemetry`)
-before we can pull this into a PR. The catalogue-gap signal is the *use
-case* for that pipeline, not a justification for inventing one inline here.
+**Scope it as its own spec** before we can pull this into a PR. The
+catalogue-gap signal is the *use case* for the pipeline, not a
+justification for inventing one inline here.
 
 In the meantime, E7's dev-build banner + `console.warn` is the lightweight
 substitute: engineers see catalogue gaps during development without needing
-a server-side sink.
+a remote sink.
 
 ---
 
@@ -404,15 +389,11 @@ Files touched: `entities/authentication/{domain,ui,utils}/*`,
 `graphqlClientApollo.tsx`. Tests: unit tests for `logoutLocally`; component
 test for `useAuth` `storage`-event reconciliation.
 
-### PR 3 — Catalogue drift safety net (MEDIUM, before US2)
+### PR 3 — Catalogue type-clarity & generator bootstrap (MEDIUM, before US2)
 
-**Why bundle:** all three items defend the hand-written mirror until US2
-replaces it, and the generator-infra bootstrap is the natural on-ramp to
-that replacement.
+**Why bundle:** both items reduce the gap between the hand-written mirror
+and the eventual generated bindings.
 
-- **E6** — Backend pytest that snapshots `(code, payload field names)` to a
-  JSON file. Frontend `errors.test.ts` reads the same JSON and asserts the
-  mirror matches. Catches drift loudly on either side.
 - **E4** — Add a header comment on `RestErrorItem` explaining the REST/GraphQL
   envelope split and pointing at the catalogue mirror, so future readers
   don't conflate the two `code` shapes.
@@ -421,41 +402,35 @@ that replacement.
   `check:error-bindings` pnpm scripts. Tooling-only — T028–T030 stay in
   US2's PR.
 
-Files touched: `backend/tests/unit/errors/test_catalogue_snapshot.py` (new),
-`backend/infrahub/errors/_snapshot.json` (or equivalent),
-`frontend/app/src/shared/api/rest/fetch.ts`,
-`frontend/app/src/shared/api/graphql/errors.test.ts`,
+Files touched: `frontend/app/src/shared/api/rest/fetch.ts`,
 `frontend/app/package.json`.
 
-### PR 4 — Catalogue visibility & UX polish (LOW–MEDIUM)
+### PR 4 — Polish & micro-opts (LOW)
 
-**Why bundle:** both items improve what the user/engineer *sees* when an
-error fires; touching `errorLink` and `login.tsx` once is cheaper than
-twice.
+**Why bundle:** four small, low-risk items that all depend on earlier PRs
+landing. Splitting them across two PRs (the spec's earlier draft did) adds
+review hops without buying separation — none of them carry independent
+risk.
 
+Visibility / UX:
 - **E7** — Dev-build banner + `console.warn` for `UNDEFINED_ERROR` so
   catalogue gaps are visible during development. Gated on
   `import.meta.env.DEV`. No new dependency.
 - **A8** — When `RestErrorItem.extensions.code` is present, render it
   alongside the message on the login page so SSO failures are
-  self-diagnosable.
+  self-diagnosable. Depends on A6 (PR 1) for the typed login error shape.
 
-Depends on A6 (PR 1) for the typed login error shape.
-
-E8 (remote telemetry for catalogue gaps) is intentionally **excluded** —
-see Out of scope below.
-
-### PR 5 — Micro-optimisations (OPPORTUNISTIC)
-
-**Why bundle:** unrelated to the catalogue work, both tiny, neither blocks
-anything else.
-
+Micro-opts:
 - **A4** — Cache the access token at module scope in `authLink`; refresh it
   via the `storage` event added in A7 and via `useAuth.setToken`. Avoids a
-  synchronous `localStorage` read per Apollo operation.
+  synchronous `localStorage` read per Apollo operation. Depends on A7
+  (PR 2) for the storage listener.
 - **A5** — Stabilise the SSO callback `useEffect` deps in
   `auth-callback.tsx` so a config refetch doesn't re-run the token
   exchange.
+
+E8 (remote telemetry for catalogue gaps) is intentionally **excluded** —
+see Out of scope below.
 
 ### Out of scope here
 
@@ -466,13 +441,25 @@ anything else.
   of scope — it's pulled forward as E9 / PR 3. Only the deletion and the
   generator-script wiring (T028–T030) stay in US2.
 - **E8 — remote telemetry for catalogue gaps.** No frontend telemetry
-  pipeline exists today, and `INFP-471` is backend-only. Needs its own
-  spec (sink choice, event schema, opt-out, air-gap behaviour, rate
-  limiting). E7's dev-build banner gives us catalogue-gap visibility
-  during development in the meantime.
+  pipeline exists today. Needs its own spec (sink choice, event schema,
+  opt-out, air-gap behaviour, rate limiting). E7's dev-build banner gives
+  us catalogue-gap visibility during development in the meantime.
+
+### Branch scope
+
+This branch is **frontend-only**. If a PR here needs an artifact that
+hasn't shipped yet (e.g. E9's eventual generator needs the catalogue
+JSON schema from US1, which is already on `develop`), the strategy is
+**rebase from `develop` to pull it in** — no out-of-tree changes on this
+branch.
 
 ### Suggested merge order
 
-PR 1 → PR 2 → PR 3 → PR 4 → PR 5. PR 1 and PR 2 are independent and can be
-opened in parallel; the rest depend on PR 1's types (`RestErrorItem` usage)
-or on landing before US2.
+PR 1 → PR 2 → PR 3 → PR 4. PR 1, PR 2, and PR 3 are independent and can
+be opened in parallel; PR 4 depends on PR 1 (A6's typing → A8) and PR 2
+(A7's storage listener → A4).
+
+**One conflict to expect:** PR 1's E2 calls `redirectToLogin()`, which
+PR 2's A3 replaces with `logoutLocally({ reason: "expired" })`. Whichever
+lands second rebases that one line — trivial, but worth flagging so the
+second PR's CI surfaces it.
