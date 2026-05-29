@@ -158,6 +158,30 @@ engineers in dev builds (banner + console.warn referencing the original
 message) rather than silently toasted as a generic error. Gate it on
 `import.meta.env.DEV` so prod stays unchanged.
 
+### E9 — Bootstrap the error-bindings generator infra (pulls in INFP-468 T027)
+
+**Where:** `frontend/app/package.json`, `frontend/app/scripts/` (new).
+
+`specs/infp-468-graphql-error-catalogue/tasks.md:92` (T027) is the first task
+of US2's frontend bindings sequence (T027 → T028 → T029 → T030) and is
+self-contained tooling work — no behaviour change, no consumer code
+touched. Pulling it forward into this backlog unblocks the rest of the
+US2 frontend chain without waiting for the full US2 PR to be assembled,
+and gives PR 3 (catalogue drift safety net) a concrete next step beyond
+the snapshot test.
+
+T027 verbatim: *Add `json-schema-to-typescript` to `frontend/app/package.json`
+`devDependencies` and register pnpm scripts `generate:error-bindings` and
+`check:error-bindings` (R-004).* See `specs/infp-468-graphql-error-catalogue/`
+for `R-004` and the surrounding contract.
+
+Scope guard: land **only T027** here. T028 (generator script), T029
+(generated output), T030 (hand-written `index.ts` re-export) and T031f
+(delete the mirror — see E5) stay in US2's PR so ownership of the
+catalogue surface doesn't fragment across two specs. Once T027 lands
+here, US2's tasks.md should mark T027 done with a back-reference to this
+spec's PR number.
+
 ### E8 — Telemetry for unmatched error codes (BLOCKED: no telemetry pipeline)
 
 **Where:** would live in `graphqlClientApollo.tsx` → `errorLink`.
@@ -382,8 +406,9 @@ test for `useAuth` `storage`-event reconciliation.
 
 ### PR 3 — Catalogue drift safety net (MEDIUM, before US2)
 
-**Why bundle:** both items defend the hand-written mirror until US2 replaces
-it.
+**Why bundle:** all three items defend the hand-written mirror until US2
+replaces it, and the generator-infra bootstrap is the natural on-ramp to
+that replacement.
 
 - **E6** — Backend pytest that snapshots `(code, payload field names)` to a
   JSON file. Frontend `errors.test.ts` reads the same JSON and asserts the
@@ -391,11 +416,16 @@ it.
 - **E4** — Add a header comment on `RestErrorItem` explaining the REST/GraphQL
   envelope split and pointing at the catalogue mirror, so future readers
   don't conflate the two `code` shapes.
+- **E9** — Pull in INFP-468 T027: add `json-schema-to-typescript` to
+  `devDependencies` and register `generate:error-bindings` /
+  `check:error-bindings` pnpm scripts. Tooling-only — T028–T030 stay in
+  US2's PR.
 
 Files touched: `backend/tests/unit/errors/test_catalogue_snapshot.py` (new),
 `backend/infrahub/errors/_snapshot.json` (or equivalent),
 `frontend/app/src/shared/api/rest/fetch.ts`,
-`frontend/app/src/shared/api/graphql/errors.test.ts`.
+`frontend/app/src/shared/api/graphql/errors.test.ts`,
+`frontend/app/package.json`.
 
 ### PR 4 — Catalogue visibility & UX polish (LOW–MEDIUM)
 
@@ -429,9 +459,12 @@ anything else.
 
 ### Out of scope here
 
-- **E5 — delete the hand-written catalogue mirror.** Belongs to US2
-  (T027–T030) task list; add a CI check that fails if both `errors.ts` and
-  the generated module coexist. Track inside US2.
+- **E5 — delete the hand-written catalogue mirror.** Belongs to US2's task
+  list (the deletion step paired with T029/T030 landing); add a CI check
+  that fails if both `errors.ts` and the generated module coexist. Track
+  inside US2. Note: T027 itself (generator devDep + scripts) is *not* out
+  of scope — it's pulled forward as E9 / PR 3. Only the deletion and the
+  generator-script wiring (T028–T030) stay in US2.
 - **E8 — remote telemetry for catalogue gaps.** No frontend telemetry
   pipeline exists today, and `INFP-471` is backend-only. Needs its own
   spec (sink choice, event schema, opt-out, air-gap behaviour, rate
