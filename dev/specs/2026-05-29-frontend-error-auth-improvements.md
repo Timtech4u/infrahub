@@ -144,13 +144,39 @@ engineers in dev builds (banner + console.warn referencing the original
 message) rather than silently toasted as a generic error. Gate it on
 `import.meta.env.DEV` so prod stays unchanged.
 
-### E8 — Telemetry for unmatched error codes
+### E8 — Telemetry for unmatched error codes (BLOCKED: no telemetry pipeline)
 
-**Where:** `graphqlClientApollo.tsx` → `errorLink`.
+**Where:** would live in `graphqlClientApollo.tsx` → `errorLink`.
 
-Forward `UNDEFINED_ERROR` occurrences to whatever telemetry sink the app uses
-(or stash them in localStorage during dev). This is what gives us the
-"catalogue gap" signal the spec promises.
+**Status: not actionable in isolation.** The frontend has no telemetry SDK
+today (no Sentry / PostHog / Datadog / Segment in `package.json` or `src/`)
+and `INFP-471` ("local telemetry storage") is a *backend* daily-snapshot
+pipeline, not a browser-event sink — it does not solve this.
+
+To make E8 real, we first need a decision on:
+
+1. **Sink.** Self-hosted (write to a backend `/api/telemetry/event`
+   endpoint), third-party SaaS (Sentry, PostHog), or no remote sink at all
+   (in-app counter surfaced on an admin diagnostic page). Each implies
+   different opt-out, on-prem / air-gapped, and dependency tradeoffs.
+2. **Event schema.** Minimum: `{ code, http_status, operation_name, path,
+   timestamp, deployment_id }`. No personally-identifying request body
+   content; the catalogue `data` payloads should be allow-listed per code
+   before being attached.
+3. **Opt-out + air-gap behaviour.** Must respect the same opt-out toggle
+   `INFP-471` uses on the backend, and must no-op silently when the network
+   is unreachable.
+4. **Volume control.** Bucket by `(code, operation_name)` and rate-limit
+   per session — `UNDEFINED_ERROR` could easily fire hundreds of times in a
+   loop before the user notices.
+
+**Scope it as its own spec** (e.g. `infp-XXX-frontend-error-telemetry`)
+before we can pull this into a PR. The catalogue-gap signal is the *use
+case* for that pipeline, not a justification for inventing one inline here.
+
+In the meantime, E7's dev-build banner + `console.warn` is the lightweight
+substitute: engineers see catalogue gaps during development without needing
+a server-side sink.
 
 ---
 
@@ -316,20 +342,21 @@ Files touched: `backend/tests/unit/errors/test_catalogue_snapshot.py` (new),
 
 ### PR 4 — Catalogue visibility & UX polish (LOW–MEDIUM)
 
-**Why bundle:** all three improve what the user/engineer *sees* when an
-error fires; touching `errorLink` and `login.tsx` once is cheaper than twice.
+**Why bundle:** both items improve what the user/engineer *sees* when an
+error fires; touching `errorLink` and `login.tsx` once is cheaper than
+twice.
 
 - **E7** — Dev-build banner + `console.warn` for `UNDEFINED_ERROR` so
   catalogue gaps are visible during development. Gated on
-  `import.meta.env.DEV`.
-- **E8** — Forward `UNDEFINED_ERROR` occurrences to whatever telemetry sink
-  exists (or stash in `localStorage` during dev) so we can quantify
-  catalogue coverage over time.
+  `import.meta.env.DEV`. No new dependency.
 - **A8** — When `RestErrorItem.extensions.code` is present, render it
   alongside the message on the login page so SSO failures are
   self-diagnosable.
 
 Depends on A6 (PR 1) for the typed login error shape.
+
+E8 (remote telemetry for catalogue gaps) is intentionally **excluded** —
+see Out of scope below.
 
 ### PR 5 — Micro-optimisations (OPPORTUNISTIC)
 
@@ -343,11 +370,16 @@ anything else.
   `auth-callback.tsx` so a config refetch doesn't re-run the token
   exchange.
 
-### Out of scope here — track in US2
+### Out of scope here
 
-- **E5** — Delete the hand-written catalogue mirror. Belongs to US2 (T027–T030)
-  task list; add a CI check that fails if both `errors.ts` and the generated
-  module coexist.
+- **E5 — delete the hand-written catalogue mirror.** Belongs to US2
+  (T027–T030) task list; add a CI check that fails if both `errors.ts` and
+  the generated module coexist. Track inside US2.
+- **E8 — remote telemetry for catalogue gaps.** No frontend telemetry
+  pipeline exists today, and `INFP-471` is backend-only. Needs its own
+  spec (sink choice, event schema, opt-out, air-gap behaviour, rate
+  limiting). E7's dev-build banner gives us catalogue-gap visibility
+  during development in the meantime.
 
 ### Suggested merge order
 
