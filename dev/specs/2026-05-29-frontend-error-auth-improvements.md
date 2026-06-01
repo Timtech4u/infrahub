@@ -3,6 +3,59 @@
 > Captured 2026-05-29 after reviewing `pog-infp-468-us1-graphql-error-formatter`.
 > Each item is independent — pick whichever fits the next iteration.
 
+## Implementation status (as of 2026-06-01)
+
+The backlog landed across three PRs against `develop`. The PR-plan section
+near the bottom of this document is the *original* plan; the table below is
+what actually shipped, including items that were dropped or deferred during
+implementation.
+
+| Item | Status                              | Where                                       |
+| ---- | ----------------------------------- | ------------------------------------------- |
+| E1   | Shipped                             | PR 1 (#9390 — merged)                       |
+| E2   | Shipped (alt approach — see below)  | PR 1 (#9390 — merged)                       |
+| E3   | Shipped                             | PR 1 (#9390 — merged)                       |
+| E4   | Shipped                             | PR 4 (`ple-pr4-polish-and-micro-opts`)      |
+| E5   | Out of scope here — owned by US2    | INFP-468 US2 (T029/T030 deletion step)      |
+| E6   | Dropped — backend-only              | (separate backend ticket)                   |
+| E7   | Shipped                             | PR 4                                        |
+| E8   | Blocked — no telemetry pipeline     | needs its own spec                          |
+| E9   | Deferred — returns to US2           | shipping the devDep before T028's consumer  |
+|      |                                     | trips knip; lands alongside T028 in US2.    |
+| A1   | Shipped                             | PR 2 (#9401 — merged)                       |
+| A2   | Shipped                             | PR 1 (#9390 — merged)                       |
+| A3   | **Investigated and dropped**        | The four call sites legitimately do         |
+|      |                                     | different things, and three hard-nav        |
+|      |                                     | (which reloads the page and wipes the       |
+|      |                                     | cache anyway), so a unified helper bundled  |
+|      |                                     | redundant work. PR 1's `redirectToLogin`    |
+|      |                                     | already covers the consolidation that       |
+|      |                                     | actually mattered.                          |
+| A4   | Deferred                            | Micro-opt; spec already gated it on "if/when |
+|      |                                     | we add Apollo subscriptions or batch         |
+|      |                                     | requests" — neither exists yet.              |
+| A5   | Shipped                             | PR 4                                        |
+| A6   | Shipped                             | PR 1 (#9390 — merged)                       |
+| A7   | Shipped                             | PR 2 (#9401 — merged)                       |
+| A8   | Shipped together with A6            | PR 1 — `login.tsx` already renders          |
+|      |                                     | `({error.extensions.code}) {error.message}`.|
+
+Two notable implementation deltas from the original plan:
+
+- **E2 alt approach:** the plan was a per-operation counter on
+  `operation.getContext().authRetryCount`. The merged version
+  (`retryWithRefreshedToken`) inspects the *replayed result* instead — if
+  the forwarded response still carries `TOKEN_EXPIRED`, the retry observable
+  errors out with a sentinel and bounces to `/login`. Same external
+  behaviour (one refresh+replay, then bail), simpler internals — Apollo's
+  `onError` doesn't re-enter the handler on results from the retried
+  observable, so the result-inspection path is where the bail has to
+  happen anyway.
+- **PR plan collapsed from 5 PRs to 3 + 1.** Original plan had PRs 1-5.
+  Final shape: PR 1 + PR 2 + PR 4 (the polish bundle). The "PR 3
+  (catalogue type-clarity & generator bootstrap)" PR was retired: E4
+  moved to PR 4, E9 returned to US2 (see above).
+
 ## Context
 
 The `INFP-468` US1 branch wired the backend GraphQL error catalogue into the
