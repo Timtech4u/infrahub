@@ -55,8 +55,8 @@ Identical attribute set on both nodes (so the merge is trivially per-attribute):
 
 | Attribute | Kind | Notes |
 |---|---|---|
-| `date_format` | Text | date-fns pattern string (e.g. `dd/MM/yyyy`, `yyyy-MM-dd HH:mm`). Literal `relative` is a sentinel for relative-time rendering. Validated client-side via dry-run `format(new Date(), pattern)`; backend stores verbatim. |
-| `timezone` | Text | IANA timezone name (`Europe/Paris`, `UTC`). Validated client-side against `Intl.supportedValuesOf('timeZone')`. Unset = browser-resolved zone. |
+| `date_format` | Text | date-fns pattern string, chosen in the UI from a curated preset list (e.g. `dd/MM/yyyy`, `yyyy-MM-dd HH:mm`). Literal `relative` is a preset for relative-time rendering. Presets are a UI constraint, not a schema one — backend stores the pattern verbatim, so the SDK can write any pattern. |
+| `timezone` | Text | IANA timezone name (`Europe/Paris`, `UTC`). Selected in the UI from `Intl.supportedValuesOf('timeZone')`. Unset = browser-resolved zone. |
 
 All attributes optional on both nodes. Other candidates (dark mode, language, density) are deferred — see "Future preferences" below.
 
@@ -64,10 +64,10 @@ All attributes optional on both nodes. Other candidates (dark mode, language, de
 
 ### `CoreGlobalPreference`
 
-- Defined in `backend/infrahub/core/schema/definitions/core/account.py` (or `preferences.py` if we prefer to keep account-scoped files focused).
-- `name="GlobalPreference"`, `namespace="Core"`.
+- Defined in `backend/infrahub/core/schema/definitions/core/preference.py` (new file), registered in `definitions/core/__init__.py`.
+- `name="GlobalPreference"`, `namespace="Core"`. Note: `Core` (not `Internal` like `AccountToken`) is deliberate — these nodes are user-facing and SDK-visible.
 - `branch=BranchSupportType.AGNOSTIC`.
-- Singleton enforced by an empty uniqueness constraint plus a startup check that creates the row if missing — or, simpler, treated as "0..1, app code refuses to create a second one". Decision flagged for implementation.
+- Singleton: an empty row is seeded in `first_time_initialization()` (`core/initialization.py`) for new installs, plus a graph migration in `core/migrations/graph/` for existing installs. App code treats it as 0..1 and refuses to create a second row.
 - No relationships in V1.
 
 ```yaml
@@ -152,9 +152,11 @@ query InfrahubEffectivePreferences {
 }
 ```
 
-Implementation in `backend/infrahub/graphql/queries/preferences.py`:
+Scalar fields (no `Attribute { value }` wrapper) is the decided shape: this is a computed view, not a node, and the lean shape is what the rendering path wants.
 
-1. Resolve account from JWT (existing `AccountMixin` pattern).
+Implementation in `backend/infrahub/graphql/queries/preferences.py` (resolver + Graphene `Field`, exported in `queries/__init__.py`, attached to `InfrahubBaseQuery` in `graphql/schema.py`):
+
+1. Resolve account from JWT via `graphql_context.account_session.account_id` (same pattern as `resolve_account_tokens` in `graphql/queries/account.py`).
 2. Read the singleton `CoreGlobalPreference` (cache-friendly, branch-agnostic).
 3. Read the caller's `CoreUserPreference` if any.
 4. Per attribute: return user value if set, else global value, else `null`.
@@ -167,10 +169,13 @@ The frontend interprets `null` as "use built-in default". The SDK can do the sam
 |---|---|
 | Read `InfrahubEffectivePreferences` | Any authenticated account (returns their own effective view) |
 | Read `CoreGlobalPreference` | Any authenticated account |
-| Write `CoreGlobalPreference` | Admins (via existing node-level permission model) |
+| Write `CoreGlobalPreference` | Admins (via `ObjectPermission` on `Core` / `GlobalPreference`) |
 | Read/write `CoreUserPreference` | Owner; admin can also read/write any user's prefs |
 
-Owner check on `CoreUserPreference` writes is enforced through the standard permission system, not bespoke logic — same approach as `AccountToken`.
+Two distinct mechanisms, matching how the codebase actually works:
+
+- **`CoreGlobalPreference`** — standard node-level `ObjectPermission` model. Admin roles get update/delete on `Core/GlobalPreference`; everyone keeps read.
+- **`CoreUserPreference`** — owner-scoping follows the `AccountToken` mechanism, which is *not* the node-level permission system: the query resolver filters on `account__ids = [calling account]` (see `graphql/queries/account.py`) and mutations re-check ownership before writing (see `AccountMixin` in `graphql/mutations/account.py`). Admins bypass the ownership check.
 
 ## Frontend
 
@@ -182,26 +187,31 @@ Owner check on `CoreUserPreference` writes is enforced through the standard perm
 - All write hooks invalidate `useEffectivePreferences()` on success.
 - No `localStorage` dual-write.
 
-### Preferences page
+### Preferences tabs (account settings)
 
-New route `/settings/preferences` (exact path TBD against existing settings IA):
+Decided: preferences live as new tabs in the existing account settings page (`/profile`, tabs declared in `entities/user-profile/ui/profile-tabs.tsx` — currently Profile / Tokens / Password):
 
-- Two sections, only visible if the user has the relevant permission:
-  - **My preferences** — editable form for `date_format`, `timezone`. Each field shows the inherited global value as its placeholder/hint when the user has no override; a "reset to global" button clears the override.
-  - **Organisation defaults** *(admin only)* — editable form for the same fields on `CoreGlobalPreference`.
-- Form validation:
-  - `date_format`: dry-run `date-fns.format(new Date(), value)`; reject if it throws.
-  - `timezone`: must be in `Intl.supportedValuesOf('timeZone')`.
+- **Preferences** tab (`/profile/preferences`) — always visible. Editable form for the user's own `date_format`, `timezone`. Each field shows the inherited global value as its placeholder/hint when the user has no override; a "reset to global" button clears the override. The `CoreUserPreference` row is created lazily on first save (upsert), not at account creation.
+- **Organisation defaults** tab (`/profile/organisation-defaults`, naming TBD at implementation) — same fields on `CoreGlobalPreference`. Visible only when the user has update permission on `CoreGlobalPreference`, checked via `useGetObjectPermissions` (the frontend has no super-admin flag; object permissions are the only gating mechanism).
+- Form inputs (presets only — no free-text patterns in the UI):
+  - `date_format`: select from a curated preset list, including `relative` for relative-time rendering.
+  - `timezone`: searchable select over `Intl.supportedValuesOf('timeZone')`.
 
-### Date formatter helper
+### Date rendering — DateDisplay as the consolidation vehicle
 
-`frontend/app/src/shared/hooks/useDateFormat.ts` (new):
+`DateDisplay` (`frontend/app/src/shared/components/display/date-display.tsx`) is where the preferences land. An internal hook (`useDateFormat`) feeds it:
 
 - Reads `useEffectivePreferences()`.
-- Default `date_format` if both global and user are unset: `yyyy-MM-dd HH:mm` (decision flagged).
+- Default `date_format` if both global and user are unset: `yyyy-MM-dd HH:mm` (decided).
 - Default `timezone` if unset: `Intl.DateTimeFormat().resolvedOptions().timeZone`.
-- Routes through `date-fns` + `date-fns-tz` (~15 kB gz, new dependency).
-- All current `format(date, …)` call sites migrate to this helper so the preference applies uniformly.
+- date-fns is v4 — use the first-party `@date-fns/tz` package (not the legacy `date-fns-tz`) for timezone-aware formatting.
+- The timezone preference applies to absolute renderings and tooltips (`shared/utils/date.ts`); relative-time text ("2 days ago") is timezone-independent and unchanged.
+- Known non-`DateDisplay` display call sites to migrate to `DateDisplay` (preferred) or the hook:
+  - `entities/events/ui/global-event.tsx` (two direct `format()` calls)
+  - `entities/navigation/ui/time-selector.tsx`
+  - `shared/components/display/duration-display.tsx`
+  - `entities/navigation/ui/search-anywhere/search-nodes.tsx`
+- Form inputs (`datetime.field.tsx`, `date-picker.tsx`) do submission/validation, not display — out of scope.
 
 ## Future Preferences (out of V1, listed for context)
 
@@ -223,15 +233,19 @@ These are listed here as a backlog hint, not committed scope.
 - Cross-account preference import/export.
 - Schema graph visualisation state (fold/zoom/positions) — stays in `localStorage` for now.
 
-## Open Questions
+## Resolved Decisions
 
-- **Singleton enforcement for `CoreGlobalPreference`.** Easiest is "treat as 0..1, app refuses to create a second", possibly seeded by a migration creating an empty row. Confirm during implementation.
-- **Effective query shape.** Returning scalar fields rather than the standard `Attribute { value }` wrapper diverges from the rest of the GraphQL surface. Tradeoff: easier to consume, but inconsistent. Open for review.
-- **Default `date_format` when nothing is stored.** Suggested: `yyyy-MM-dd HH:mm`. Locale-aware default would be friendlier but couples behaviour to browser locale and hides the inheritance chain.
-- **Settings page location.** Slot under existing account settings, or top-level `/settings/preferences`?
+Formerly open questions, now decided:
+
+- **Singleton enforcement for `CoreGlobalPreference`** — seeded empty row in `first_time_initialization()` for new installs + graph migration for existing installs; app refuses a second row.
+- **Effective query shape** — scalar fields. It is a computed view, not a node; the lean shape wins.
+- **Default `date_format` when nothing is stored** — `yyyy-MM-dd HH:mm`, applied in the frontend.
+- **Settings page location** — tabs in the existing account settings page (`/profile`), not a top-level route.
+- **Format input style** — curated presets only in the UI (incl. `relative`); free-text patterns remain possible via SDK/API since the backend stores verbatim.
+- **`CoreUserPreference` creation** — lazy upsert on first save, no row at account creation.
 
 ## Migration & Rollout
 
-- Purely additive. New schema nodes, new GraphQL query, new frontend hook + page.
-- Existing date-rendering code keeps working until each call site migrates to the new helper. Migration can ship incrementally per call site.
-- No data migration required.
+- Purely additive. New schema nodes, new GraphQL query, new frontend hooks + tabs.
+- Existing date-rendering code keeps working until each call site migrates to `DateDisplay`. Migration can ship incrementally per call site.
+- One small graph migration seeds the empty `CoreGlobalPreference` row on existing installs.
