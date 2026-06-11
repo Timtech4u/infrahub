@@ -169,12 +169,12 @@ The frontend interprets `null` as "use built-in default". The SDK can do the sam
 |---|---|
 | Read `InfrahubEffectivePreferences` | Any authenticated account (returns their own effective view) |
 | Read `CoreGlobalPreference` | Any authenticated account |
-| Write `CoreGlobalPreference` | Admins (via `ObjectPermission` on `Core` / `GlobalPreference`) |
+| Write `CoreGlobalPreference` | Holders of the new `manage_global_preferences` global permission (super admins implicitly) |
 | Read/write `CoreUserPreference` | Owner; admin can also read/write any user's prefs |
 
 Two distinct mechanisms, matching how the codebase actually works:
 
-- **`CoreGlobalPreference`** — standard node-level `ObjectPermission` model. Admin roles get update/delete on `Core/GlobalPreference`; everyone keeps read.
+- **`CoreGlobalPreference`** — a new `GlobalPermissions.MANAGE_GLOBAL_PREFERENCES` enum value, wired into `get_global_permission_for_kind()` (`backend/infrahub/permissions/types.py`) the same way account kinds require `manage_accounts` and repositories require `manage_repositories`. This is required, not optional: the default General Access role is seeded with a wildcard `ObjectPermission` (`*/*`, action `any`) plus `edit_default_branch`, so without the kind mapping every standard user could edit org defaults. Because global permissions are regular `CoreGlobalPermission` nodes, the new permission can be assigned to any role through the existing permissions system; `super_admin` bypasses it. The frontend's `useGetObjectPermissions("CoreGlobalPreference")` gating keeps working unchanged — the backend folds the global-permission requirement into the computed kind permissions.
 - **`CoreUserPreference`** — owner-scoping follows the `AccountToken` mechanism, which is *not* the node-level permission system: the query resolver filters on `account__ids = [calling account]` (see `graphql/queries/account.py`) and mutations re-check ownership before writing (see `AccountMixin` in `graphql/mutations/account.py`). Admins bypass the ownership check.
 
 ## Frontend
@@ -243,6 +243,7 @@ Formerly open questions, now decided:
 - **Settings page location** — tabs in the existing account settings page (`/profile`), not a top-level route.
 - **Format input style** — curated presets only in the UI (incl. `relative`); free-text patterns remain possible via SDK/API since the backend stores verbatim.
 - **`CoreUserPreference` creation** — lazy upsert on first save, no row at account creation.
+- **Admin gating for `CoreGlobalPreference`** — new `manage_global_preferences` global permission + kind mapping, rather than seeded `ObjectPermission` deny rows (fragile against wildcard-bearing custom roles) or reusing an existing permission (misleading).
 
 ## Migration & Rollout
 
