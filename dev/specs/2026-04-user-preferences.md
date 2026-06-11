@@ -43,7 +43,7 @@ Effective resolution per attribute: **user value if set, else global value, else
 
 ## Success Criteria — V1
 
-- An admin can set `date_format` and `timezone` once for the organisation; an unauthenticated browser-issued read returns those values for any user without a personal override.
+- An admin can set `date_format` and `timezone` once for the organisation; any authenticated user without a personal override sees those values.
 - A user can override either attribute on their own preferences page; the override takes effect on next page load and is visible from any device.
 - Removing a user override falls back to the global value; removing the global value falls back to the frontend default.
 - Standard CRUD mutations work for both nodes (admin tooling, SDK use, Postman).
@@ -189,7 +189,7 @@ Two distinct mechanisms, matching how the codebase actually works:
 
 ### Preferences tabs (account settings)
 
-Decided: preferences live as new tabs in the existing account settings page (`/profile`, tabs declared in `entities/user-profile/ui/profile-tabs.tsx` — currently Profile / Tokens / Password):
+Decided: preferences live as new tabs in the existing account settings page (`/profile`, tabs declared in `entities/user-profile/ui/user-profile.tsx` — currently Profile / Tokens / Password):
 
 - **Preferences** tab (`/profile/preferences`) — always visible. Editable form for the user's own `date_format`, `timezone`. Each field shows the inherited global value as its placeholder/hint when the user has no override; a "reset to global" button clears the override. The `CoreUserPreference` row is created lazily on first save (upsert), not at account creation.
 - **Organisation defaults** tab (`/profile/organisation-defaults`, naming TBD at implementation) — same fields on `CoreGlobalPreference`. Visible only when the user has update permission on `CoreGlobalPreference`, checked via `useGetObjectPermissions` (the frontend has no super-admin flag; object permissions are the only gating mechanism).
