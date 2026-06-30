@@ -128,30 +128,32 @@ auto-generated `InfrahubMutation` schema path).
 ```graphql
 query InfrahubEffectivePreferences {
   InfrahubEffectivePreferences {
-    date_format                  # merged — user > global > null (the value to render with)
-    timezone                     # merged — user > global > null
-    user_date_format             # the caller's OWN override, or null
-    user_timezone                # the caller's OWN override, or null
-    global_date_format           # the org default, or null
-    global_timezone              # the org default, or null
-    can_edit_global_preferences  # boolean — drives the "Organisation defaults" tab (see Permissions)
+    preferences {                # one entry per preference key — already resolved
+      key                        # "date_format" | "timezone"
+      value                      # the resolved value to use, or null when nothing is defined
+      source                     # USER | GLOBAL | DEFAULT — where `value` came from
+    }
+    global { date_format timezone }   # raw org defaults — admin-only, for the Organisation-defaults editor
+    can_edit_global_preferences       # boolean — drives the "Organisation defaults" tab (see Permissions)
   }
 }
 ```
 
-Scalar fields (no `Attribute { value }` wrapper) — this is a computed view, not a node. The query
-returns three views of each field so one round trip serves every surface: the **merged** value for
-rendering, the caller's **own** override (so the user form shows what they set vs. inherited, and
-"reset to global" maps to clearing it), and the raw **global** value (so the Organisation-defaults
-editor edits the actual org default — not the merged value — and the user form shows it as the
-inherited hint). Privacy holds: `global_*` is org-wide and fine to expose to any authenticated
-account, while `user_*` is the caller's own only (the query is account-bound). Resolver:
+The key design point: the backend **computes the value and attaches an explicit source**, so the
+frontend never compares "user vs global" itself. `preferences` is a list (extensible to future
+keys) that the `useEffectivePreferences()` hook collapses into a keyed map
+(`prefs.date_format.{value,source}`). `source: DEFAULT` means nothing is defined → `value` is
+`null` → the client applies the **browser** value (the only step that must stay client-side, since
+only the browser knows its locale/zone). The separate `global` block is the one exception, used
+*only* by the Organisation-defaults editor: an admin who also has a personal override would see
+`source: USER` on the merged entry, so the editor needs the raw global to edit it correctly.
+Privacy holds — the merged `value`/`source` and the `global` block are both org-wide or the
+caller's own (the query is account-bound; another user's override is never exposed). Resolver:
 
 1. Resolve the caller via `graphql_context.account_session.account_id`; reject unauthenticated/anonymous sessions (`PermissionDeniedError`).
-2. Read the singleton `GlobalPreference` (`get_global()`).
-3. Read the caller's `UserPreference` by `account_id` (or none).
-4. Per field: emit `user_<field>` (own override), `global_<field>` (org default), and the merged `<field>` = user value if set, else global, else `null`.
-5. Compute `can_edit_global_preferences` from `graphql_context.active_permissions` (see Permissions).
+2. Read the singleton `GlobalPreference` (`get_global()`) and the caller's `UserPreference` by `account_id` (or none).
+3. Per key: `value` = user value if set, else global, else `null`; `source` = `USER` / `GLOBAL` / `DEFAULT` accordingly.
+4. Return the raw `global` block and `can_edit_global_preferences` (from `graphql_context.active_permissions`, see Permissions).
 
 **Mutations** (custom, `Branch`-style classes registered in `graphql/schema.py`):
 
@@ -176,7 +178,7 @@ No generic `…Upsert/Update/Delete`, no SDK-introspectable kind.
 
 ### Data layer
 
-- A single TanStack Query hook `useEffectivePreferences()` in `frontend/app/src/entities/preferences/` reads the one `InfrahubEffectivePreferences` query and exposes everything every surface needs: the merged `{ date_format, timezone }` (rendering), the caller's own `{ user_date_format, user_timezone }` (user form state + reset detection), the org `{ global_date_format, global_timezone }` (inherited hint + org-defaults editor), and `can_edit_global_preferences` (tab gating). No separate per-row read hooks.
+- A single TanStack Query hook `useEffectivePreferences()` in `frontend/app/src/entities/preferences/` reads the one `InfrahubEffectivePreferences` query and exposes a keyed, already-resolved map: `prefs.date_format` / `prefs.timezone` as `{ value, source }` (source `user`/`global`/`default`), plus `prefs.global` (raw org defaults for the org-editor) and `canEditGlobalPreferences`. Consumers read `value` + `source` directly — no comparing user-vs-global. A `source: "default"` value is `null`, so the consumer applies the browser value.
 - `useUpdateMyUserPreferences()` → calls `InfrahubUserPreferenceUpsert` (caller's own row; no account argument). "Reset to global" sends explicit `null` for the field(s) (there is no delete mutation).
 - `useUpdateGlobalPreferences()` → calls `InfrahubGlobalPreferenceUpdate`.
 - There is **no** generic read of another user's preferences and no generic CRUD mutation; reads go through the single effective query and writes through the two custom mutations above.
