@@ -67,7 +67,7 @@ Two `StandardNode` objects, one custom read query that fuses them.
 | `GlobalPreference` | Singleton | Holders of `manage_global_preferences` (super admins implicitly) | Any authenticated account (via the effective query) |
 | `UserPreference` | One per account (`account_id`) | The owning account only | The owning account only (admins via tooling) |
 
-Effective resolution per field: **user value if set, else global value, else built-in default**.
+Effective resolution per field: **user value if set, else global value, else the browser's own value** (the browser-resolved timezone, and the browser locale's date/time formatting). There is no fixed built-in pattern fallback — when neither preference is set the UI renders exactly as the user's browser would by default.
 Defaults live in the frontend (so the API returns `null` for "no opinion stored" and the SDK can
 apply its own).
 
@@ -183,13 +183,14 @@ No generic `…Upsert/Update/Delete`, no SDK-introspectable kind.
 - All write hooks invalidate `useEffectivePreferences()` on success.
 - No `localStorage` dual-write.
 
-### Preferences tabs (account settings)
+### Preferences surfaces (account settings)
 
-Preferences live as new tabs in the existing account settings page (`/profile`, tabs declared in
-`entities/user-profile/ui/user-profile.tsx` — currently Profile / Tokens / Password):
+User preferences live **inside the Profile tab**, in a "Preferences" card rendered **below the
+profile details** (not a separate tab). Organisation/global preferences stay in their own gated tab:
 
-- **Preferences** tab (`/profile/preferences`) — always visible. Editable form pre-filled from `user_*` (the caller's own override); each field shows `global_*` as its placeholder/hint when the user has no override; a "reset to global" button clears the override (explicit-null upsert). The `UserPreference` row is created lazily on first save.
-- **Organisation defaults** tab (`/profile/organisation-defaults`, naming TBD at implementation) — edits the raw `global_*` values on `GlobalPreference` (not the merged values, so an admin who also has a personal override still edits the org default correctly). Visible only when `can_edit_global_preferences` (from the effective query) is true. (Not `useGetObjectPermissions` — there is no object permission on a `StandardNode`.)
+- **Personal preferences** — a "Preferences" card on the Profile tab (`/profile`), below the account details. Editable form pre-filled from `user_*` (the caller's own override); each field shows `global_*` as its placeholder/hint when the user has no override, falling back to the **browser default** (browser-formatted example + resolved timezone) when global is also unset; a "reset to global" button clears the override (explicit-null upsert). The `UserPreference` row is created lazily on first save. Card title: "Preferences".
+- **Organisation defaults** tab (`/profile/organisation-defaults`) — edits the raw `global_*` values on `GlobalPreference` (not the merged values, so an admin who also has a personal override still edits the org default correctly). Visible only when `can_edit_global_preferences` (from the effective query) is true. (Not `useGetObjectPermissions` — there is no object permission on a `StandardNode`.) Card title: "Global date and time".
+- The card uses object-details-style rows (a shared `DetailRow`: icon + label / control) with full-bleed separators between rows and before the action buttons. Both dropdowns use the same shared `ComboboxField`; date-format options are pattern-only with a live example shown beside the input.
 - Form inputs (presets only — no free-text patterns in the UI):
   - `date_format`: select from a curated preset list, including `relative` for relative-time rendering.
   - `timezone`: searchable select over `Intl.supportedValuesOf('timeZone')`.
@@ -199,8 +200,7 @@ Preferences live as new tabs in the existing account settings page (`/profile`, 
 `DateDisplay` (`frontend/app/src/shared/components/display/date-display.tsx`) is where the preferences land. An internal hook (`useDateFormat`) feeds it:
 
 - Reads `useEffectivePreferences()`.
-- Default `date_format` if both global and user are unset: `yyyy-MM-dd HH:mm` (decided).
-- Default `timezone` if unset: `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+- When both global and user are unset, fall back to the **browser**: `date_format` → the browser locale's date/time formatting (e.g. `toLocaleString` / `Intl.DateTimeFormat` locale defaults, not a fixed pattern); `timezone` → `Intl.DateTimeFormat().resolvedOptions().timeZone`.
 - date-fns is v4 — use the first-party `@date-fns/tz` package (not the legacy `date-fns-tz`) for timezone-aware formatting.
 - The timezone preference applies to absolute renderings and tooltips (`shared/utils/date.ts`); relative-time text ("2 days ago") is timezone-independent and unchanged.
 - Known non-`DateDisplay` display call sites to migrate to `DateDisplay` (preferred) or the hook:
@@ -236,8 +236,8 @@ These are listed here as a backlog hint, not committed scope.
 - **Profiles** — not used (schema-`Node` feature; irrelevant to `StandardNode`; merge is trivial in a resolver).
 - **Singleton enforcement for `GlobalPreference`** — single instance, fetched via `get_global()` with lazy create-if-missing; no graph migration required.
 - **Effective query shape** — scalar fields, plus a `can_edit_global_preferences` boolean for tab gating.
-- **Default `date_format` when nothing is stored** — `yyyy-MM-dd HH:mm`, applied in the frontend.
-- **Settings page location** — tabs in the existing account settings page (`/profile`), not a top-level route.
+- **Default when nothing is stored** — the **browser's own values** (browser locale date/time formatting + browser-resolved timezone), not a fixed pattern. `yyyy-MM-dd HH:mm` remains only as one selectable preset.
+- **Surface location** — user preferences render in a "Preferences" card on the Profile tab, below the account details (not a separate tab); global/organisation preferences stay in their own gated tab.
 - **Format input style** — curated presets only in the UI (incl. `relative`); free-text patterns remain possible via the SDK/API since the backend stores verbatim.
 - **`UserPreference` creation** — lazy create on first save, no row at account creation.
 - **Admin gating for `GlobalPreference`** — new `manage_global_preferences` global permission, checked imperatively in the mutation resolver (not via the object-permission kind mapping, which does not apply to a `StandardNode`).
