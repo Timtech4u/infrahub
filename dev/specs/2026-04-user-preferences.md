@@ -86,12 +86,37 @@ are plain pydantic fields, not schema attributes:
 
 | Field | Type | Notes |
 |---|---|---|
-| `date_format` | `str \| None` | date-fns pattern string, chosen in the UI from a curated preset list (e.g. `dd/MM/yyyy`, `yyyy-MM-dd HH:mm`). Literal `relative` is a preset for relative-time rendering. Presets are a UI constraint, not a storage one — the backend stores the string verbatim, so the SDK can write any pattern. |
+| `date_format` | `str \| None` | A **semantic format key**, not a rendering pattern — one of `ISO_8601`, `ISO_DATETIME`, `ISO_DATETIME_SECONDS`, `EU_DATETIME`, `US_12H` (see "Date format: semantic keys" below). Each client maps the key to its own renderer (web → date-fns, backend → strftime), so the stored value is not coupled to one frontend library. Typed as the `DateFormat` GraphQL enum on write, so an unknown key is rejected at the API layer — the value is *not* free-form. |
 | `timezone` | `str \| None` | IANA timezone name (`Europe/Paris`, `UTC`). Selected in the UI from `Intl.supportedValuesOf('timeZone')`. Unset = browser-resolved zone. |
 
 `UserPreference` additionally carries `account_id: str` (the owning account). Both fields above are
 optional/nullable on both objects. Other candidates (dark mode, language, density) are deferred —
 see "Future preferences" below.
+
+### Date format: semantic keys
+
+`date_format` stores a **semantic key**, never a library-specific rendering pattern. The value is
+decoupled from any one frontend library, so every client maps the key to its own renderer: the web
+app to a date-fns pattern, the backend to `strftime` (`render_datetime` in
+`core/preferences/formats.py`), a future SDK to whatever it uses. A `DateFormat` GraphQL enum built
+from the same canonical key list validates writes for free (unknown keys rejected before any write)
+and keeps the enum and the render map from drifting.
+
+| Key | date-fns (web) | strftime (backend) | Example |
+|---|---|---|---|
+| `ISO_8601` | `yyyy-MM-dd'T'HH:mm:ssXXX` | `%Y-%m-%dT%H:%M:%S%z` | `2026-07-01T14:30:00+02:00` |
+| `ISO_DATETIME` *(default)* | `yyyy-MM-dd HH:mm` | `%Y-%m-%d %H:%M` | `2026-07-01 14:30` |
+| `ISO_DATETIME_SECONDS` | `yyyy-MM-dd HH:mm:ss` | `%Y-%m-%d %H:%M:%S` | `2026-07-01 14:30:00` |
+| `EU_DATETIME` | `dd/MM/yyyy HH:mm` | `%d/%m/%Y %H:%M` | `01/07/2026 14:30` |
+| `US_12H` | `MM/dd/yyyy hh:mm a` | `%m/%d/%Y %I:%M %p` | `07/01/2026 02:30 PM` |
+
+Every preset includes date **and** time. The set is deliberately limited to formats that render
+identically on every client with no locale library and no ambiguity. Locale-dependent forms
+(a localized long/month-name format) and a relative-time mode ("2 days ago") were considered and
+**dropped**: the former needs a locale library server-side and renders differently per client
+(defeating a portable key), and relative time is a display *mode* — inherently relative to "now" and
+ambiguous server-side — not a format, so it doesn't belong in this enum. Both can return later
+(relative time as a separate display toggle) without reshaping the stored value.
 
 ## Backend
 
@@ -199,17 +224,18 @@ profile details** (not a separate tab). Organisation/global preferences stay in 
 - **Organisation defaults** tab (`/profile/organisation-defaults`) — edits the raw global values on `GlobalPreference` (never the merged values, so an admin who also has a personal override still edits the org default correctly). Visible only when the caller may manage global preferences (see Permissions). Card title: "Global date and time". No "Automatic" option here — the org card sets the defaults themselves.
 - **"Automatic" option (= no override / inherit).** Each dropdown has an **Automatic** entry at the top. When the user has no override the field shows "Automatic"; selecting it clears the override (explicit-null write). It replaces a separate "reset to global" button — selecting Automatic *is* the reset. What "Automatic" resolves to is explained by the source indicator, not the option label.
 - **Source indicator.** Instead of a sentence under the input, an **(i) info icon to the right** of each field carries a tooltip explaining where the current effective value comes from: **your preference** / **the organisation default** / **your browser** (with the resolved value). Keyboard-accessible, AA contrast.
-- **Layout.** Object-details-style rows (a shared `DetailRow`: icon + label / control) with full-bleed separators between the rows and before the action buttons. Both dropdowns use the same shared `ComboboxField` at the **same fixed width**; the date-format options are pattern-only with a live example of the selected format shown beside the (width-capped) input.
+- **Layout.** Object-details-style rows (a shared `DetailRow`: icon + label / control) with full-bleed separators between the rows and before the action buttons. Both dropdowns use the same shared `ComboboxField` at the **same fixed width**; each date-format option is labelled by its format (the pattern text, or a name where the pattern is unfriendly, e.g. "ISO 8601"), with a live example of the selected format shown beside the (width-capped) input.
 - Form inputs (presets only — no free-text patterns in the UI):
-  - `date_format`: a curated preset list (incl. `relative` for relative-time rendering) plus the Automatic entry.
-  - `timezone`: a searchable list over `Intl.supportedValuesOf('timeZone')` plus the Automatic entry.
+  - `date_format`: the five semantic-key presets (see "Date format: semantic keys") plus the Automatic entry. The option's stored value is the key; its label is the human-facing format.
+  - `timezone`: a searchable list over `Intl.supportedValuesOf('timeZone')` (with `UTC` ensured present — V8/Chrome omits it) plus the Automatic entry.
 
 ### Date rendering — DateDisplay as the consolidation vehicle
 
 `DateDisplay` (`frontend/app/src/shared/components/display/date-display.tsx`) is where the preferences land. An internal hook (`useDateFormat`) feeds it:
 
 - Reads `useEffectivePreferences()`.
-- When both global and user are unset, fall back to the **browser**: `date_format` → the browser locale's date/time formatting (e.g. `toLocaleString` / `Intl.DateTimeFormat` locale defaults, not a fixed pattern); `timezone` → `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+- Resolves the effective `date_format` **key** to its date-fns pattern via the frontend key→pattern map (`entities/preferences/domain/date-format-presets.ts`), then formats.
+- When both global and user are unset (`source: "default"`), fall back to the **browser**: `date_format` → the browser locale's date/time formatting (e.g. `toLocaleString` / `Intl.DateTimeFormat` locale defaults, not a fixed key); `timezone` → `Intl.DateTimeFormat().resolvedOptions().timeZone`. (Server-side rendering has no browser, so `render_datetime` falls back to the `ISO_DATETIME` key instead — see below.)
 - date-fns is v4 — use the first-party `@date-fns/tz` package (not the legacy `date-fns-tz`) for timezone-aware formatting.
 - The timezone preference applies to absolute renderings and tooltips (`shared/utils/date.ts`); relative-time text ("2 days ago") is timezone-independent and unchanged.
 - Known non-`DateDisplay` display call sites to migrate to `DateDisplay` (preferred) or the hook:
@@ -245,9 +271,9 @@ These are listed here as a backlog hint, not committed scope.
 - **Profiles** — not used (schema-`Node` feature; irrelevant to `StandardNode`; merge is trivial in a resolver).
 - **Singleton enforcement for `GlobalPreference`** — single instance, fetched via `get_global()` with lazy create-if-missing; no graph migration required.
 - **Effective query shape** — scalar fields, plus a `can_edit_global_preferences` boolean for tab gating.
-- **Default when nothing is stored** — the **browser's own values** (browser locale date/time formatting + browser-resolved timezone), not a fixed pattern. `yyyy-MM-dd HH:mm` remains only as one selectable preset.
+- **Default when nothing is stored** — on the web, the **browser's own values** (browser locale date/time formatting + browser-resolved timezone). Server-side (no browser) the backend's `render_datetime` falls back to the `ISO_DATETIME` key. The `ISO_DATETIME` format (`yyyy-MM-dd HH:mm`) is otherwise just one selectable preset.
 - **Surface location** — user preferences render in a "Preferences" card on the Profile tab, below the account details (not a separate tab); global/organisation preferences stay in their own gated tab.
-- **Format input style** — curated presets only in the UI (incl. `relative`); free-text patterns remain possible via the SDK/API since the backend stores verbatim.
+- **Format input style** — the five semantic-key presets only; the `DateFormat` GraphQL enum validates writes, so unknown keys are rejected even via the SDK/API (the value is no longer free-form). Adding a format is one enum/key-map entry on each renderer, no schema migration.
 - **"Automatic" option** — each dropdown offers an Automatic (= inherit / no override) entry; selecting it clears the override, replacing a separate reset button. Shown as the selected option when the user has no override.
 - **Source indicator** — an (i) tooltip to the right of each field states whether the effective value comes from the user, the organisation default, or the browser (no sentence under the input).
 - **`UserPreference` creation** — lazy create on first save, no row at account creation.
