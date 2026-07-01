@@ -190,12 +190,14 @@ No generic `…Upsert/Update/Delete`, no SDK-introspectable kind.
 User preferences live **inside the Profile tab**, in a "Preferences" card rendered **below the
 profile details** (not a separate tab). Organisation/global preferences stay in their own gated tab:
 
-- **Personal preferences** — a "Preferences" card on the Profile tab (`/profile`), below the account details. Editable form pre-filled from `user_*` (the caller's own override); each field shows `global_*` as its placeholder/hint when the user has no override, falling back to the **browser default** (browser-formatted example + resolved timezone) when global is also unset; a "reset to global" button clears the override (explicit-null upsert). The `UserPreference` row is created lazily on first save. Card title: "Preferences".
-- **Organisation defaults** tab (`/profile/organisation-defaults`) — edits the raw `global_*` values on `GlobalPreference` (not the merged values, so an admin who also has a personal override still edits the org default correctly). Visible only when `can_edit_global_preferences` (from the effective query) is true. (Not `useGetObjectPermissions` — there is no object permission on a `StandardNode`.) Card title: "Global date and time".
-- The card uses object-details-style rows (a shared `DetailRow`: icon + label / control) with full-bleed separators between rows and before the action buttons. Both dropdowns use the same shared `ComboboxField`; date-format options are pattern-only with a live example shown beside the input.
+- **Personal preferences** — a "Preferences" card on the Profile tab (`/profile`), below the account details. Card title: "Preferences". Each field is pre-filled from the caller's own override when they have one, otherwise it shows the **"Automatic"** option (see below). The `UserPreference` row is created lazily on first save.
+- **Organisation defaults** tab (`/profile/organisation-defaults`) — edits the raw global values on `GlobalPreference` (never the merged values, so an admin who also has a personal override still edits the org default correctly). Visible only when the caller may manage global preferences (see Permissions). Card title: "Global date and time". No "Automatic" option here — the org card sets the defaults themselves.
+- **"Automatic" option (= no override / inherit).** Each dropdown has an **Automatic** entry at the top. When the user has no override the field shows "Automatic"; selecting it clears the override (explicit-null write). It replaces a separate "reset to global" button — selecting Automatic *is* the reset. What "Automatic" resolves to is explained by the source indicator, not the option label.
+- **Source indicator.** Instead of a sentence under the input, an **(i) info icon to the right** of each field carries a tooltip explaining where the current effective value comes from: **your preference** / **the organisation default** / **your browser** (with the resolved value). Keyboard-accessible, AA contrast.
+- **Layout.** Object-details-style rows (a shared `DetailRow`: icon + label / control) with full-bleed separators between the rows and before the action buttons. Both dropdowns use the same shared `ComboboxField` at the **same fixed width**; the date-format options are pattern-only with a live example of the selected format shown beside the (width-capped) input.
 - Form inputs (presets only — no free-text patterns in the UI):
-  - `date_format`: select from a curated preset list, including `relative` for relative-time rendering.
-  - `timezone`: searchable select over `Intl.supportedValuesOf('timeZone')`.
+  - `date_format`: a curated preset list (incl. `relative` for relative-time rendering) plus the Automatic entry.
+  - `timezone`: a searchable list over `Intl.supportedValuesOf('timeZone')` plus the Automatic entry.
 
 ### Date rendering — DateDisplay as the consolidation vehicle
 
@@ -241,6 +243,8 @@ These are listed here as a backlog hint, not committed scope.
 - **Default when nothing is stored** — the **browser's own values** (browser locale date/time formatting + browser-resolved timezone), not a fixed pattern. `yyyy-MM-dd HH:mm` remains only as one selectable preset.
 - **Surface location** — user preferences render in a "Preferences" card on the Profile tab, below the account details (not a separate tab); global/organisation preferences stay in their own gated tab.
 - **Format input style** — curated presets only in the UI (incl. `relative`); free-text patterns remain possible via the SDK/API since the backend stores verbatim.
+- **"Automatic" option** — each dropdown offers an Automatic (= inherit / no override) entry; selecting it clears the override, replacing a separate reset button. Shown as the selected option when the user has no override.
+- **Source indicator** — an (i) tooltip to the right of each field states whether the effective value comes from the user, the organisation default, or the browser (no sentence under the input).
 - **`UserPreference` creation** — lazy create on first save, no row at account creation.
 - **Admin gating for `GlobalPreference`** — new `manage_global_preferences` global permission, checked imperatively in the mutation resolver (not via the object-permission kind mapping, which does not apply to a `StandardNode`).
 
