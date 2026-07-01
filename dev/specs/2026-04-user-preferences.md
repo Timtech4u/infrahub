@@ -123,62 +123,69 @@ Modelled on `graphql/types/branch.py`, `graphql/queries/branch.py`, `graphql/mut
 wired into the root query/mutation in `graphql/schema.py` (the custom path, **not** the
 auto-generated `InfrahubMutation` schema path).
 
-**Effective read query** — the rendering path:
+The whole surface is organised around one axis: **scope** (`EFFECTIVE` | `GLOBAL` | `USER`) × keys.
+One read query and one write mutation, both scope-parameterized.
+
+**Read** — `InfrahubPreferences(scope: PreferenceScope = EFFECTIVE)`:
 
 ```graphql
-query InfrahubEffectivePreferences {
-  InfrahubEffectivePreferences {
-    preferences {                # one entry per preference key — already resolved
+query InfrahubPreferences($scope: PreferenceScope = EFFECTIVE) {
+  InfrahubPreferences(scope: $scope) {
+    preferences {                # one entry per preference key
       key                        # "date_format" | "timezone"
-      value                      # the resolved value to use, or null when nothing is defined
+      value                      # resolved value, or null when nothing is defined for that scope
       source                     # USER | GLOBAL | DEFAULT — where `value` came from
     }
-    global { date_format timezone }   # raw org defaults — admin-only, for the Organisation-defaults editor
-    can_edit_global_preferences       # boolean — drives the "Organisation defaults" tab (see Permissions)
+    can_edit_global_preferences  # boolean — drives the "Organisation defaults" surface (see Permissions)
   }
 }
 ```
 
-The key design point: the backend **computes the value and attaches an explicit source**, so the
-frontend never compares "user vs global" itself. `preferences` is a list (extensible to future
-keys) that the `useEffectivePreferences()` hook collapses into a keyed map
-(`prefs.date_format.{value,source}`). `source: DEFAULT` means nothing is defined → `value` is
-`null` → the client applies the **browser** value (the only step that must stay client-side, since
-only the browser knows its locale/zone). The separate `global` block is the one exception, used
-*only* by the Organisation-defaults editor: an admin who also has a personal override would see
-`source: USER` on the merged entry, so the editor needs the raw global to edit it correctly.
-Privacy holds — the merged `value`/`source` and the `global` block are both org-wide or the
-caller's own (the query is account-bound; another user's override is never exposed). Resolver:
+- **`EFFECTIVE`** (default) — the caller's resolved view: per key `value` = user value if set, else global, else `null`; `source` = `USER`/`GLOBAL`/`DEFAULT`. Any authenticated account; the global singleton is read *internally* to resolve, but the caller only ever gets their own resolved values. `source: DEFAULT` (value `null`) ⇒ the client applies the **browser** value (the only client-side step, since only the browser knows its locale/zone).
+- **`USER`** — the caller's own raw override values (`source: USER`), bound to `account_session.account_id`; never another account.
+- **`GLOBAL`** — the org-wide raw values (`source: GLOBAL`); **requires `manage_global_preferences`** (used by the Organisation-defaults editor, which needs the raw global — an admin who also has a personal override would see `source: USER` under `EFFECTIVE`).
 
-1. Resolve the caller via `graphql_context.account_session.account_id`; reject unauthenticated/anonymous sessions (`PermissionDeniedError`).
-2. Read the singleton `GlobalPreference` (`get_global()`) and the caller's `UserPreference` by `account_id` (or none).
-3. Per key: `value` = user value if set, else global, else `null`; `source` = `USER` / `GLOBAL` / `DEFAULT` accordingly.
-4. Return the raw `global` block and `can_edit_global_preferences` (from `graphql_context.active_permissions`, see Permissions).
+The backend **computes the value and attaches an explicit source**, so the frontend never compares
+"user vs global." `preferences` is a list (extensible to future keys) that the hooks collapse into a
+keyed map (`prefs.date_format.{value,source}`).
 
-**Mutations** (custom, `Branch`-style classes registered in `graphql/schema.py`):
+**Write** — one mutation, scope-parameterized:
 
-- `InfrahubUserPreferenceUpsert(date_format, timezone)` — **always operates on the caller's own row**, identified by `account_session.account_id`. The mutation never accepts an account/target argument, so there is no path to write another user's row. Lazy-creates the row on first write. A reset/clear sets fields back to `null`.
-- `InfrahubGlobalPreferenceUpdate(date_format, timezone)` — gated on `manage_global_preferences` (see Permissions), updates the singleton.
+```graphql
+mutation { InfrahubSetPreferences(scope: USER, date_format: "…", timezone: "…") { ok date_format timezone } }
+```
+
+- **`scope: USER`** — **always the caller's own row** (`account_session.account_id`); no account/target argument exists, so there is no path to write another user's row. Lazy-creates on first write; an explicit `null` for a field resets it (the "Automatic" selection).
+- **`scope: GLOBAL`** — gated on `manage_global_preferences`; updates the singleton.
+- **`scope: EFFECTIVE`** — rejected: the resolved view is read-only.
 
 No generic `…Upsert/Update/Delete`, no SDK-introspectable kind.
 
 ### Permissions
 
+Enforced imperatively at the single read + single write entry points, keyed on `scope`, fail-closed
+(unauthenticated/anonymous rejected first):
+
 | Operation | Allowed for | Mechanism |
 |---|---|---|
-| Read effective preferences | Any authenticated account (own view only) | Resolver binds to `account_session.account_id` |
-| Read/write own `UserPreference` | The owning account only | Structural — no generic query; mutation targets the caller's own row only |
-| Update `GlobalPreference` | Holders of `manage_global_preferences` (super admins implicitly) | Imperative check in the mutation resolver |
+| Read `scope: EFFECTIVE` | Any authenticated account (own resolved view) | Resolver binds to `account_session.account_id`; global read internally, no gate |
+| Read `scope: USER` | The owning account only | Bound to `account_session.account_id`; no account argument |
+| Read `scope: GLOBAL` | Holders of `manage_global_preferences` (super admins implicitly) | `active_permissions.raise_for_permission(...)` before any raw value is read |
+| Write `scope: USER` | The owning account only | Bound to caller's row; no account argument |
+| Write `scope: GLOBAL` | Holders of `manage_global_preferences` | `raise_for_permission(...)` before the read-modify-write |
+| Write `scope: EFFECTIVE` | — | Rejected (read-only view) |
 
-- **User preferences are private by construction.** There is no generic query and the custom query/mutation only ever touch the caller's own row, so user A cannot read or write user B's preferences. No object permissions, no owner-re-check machinery.
-- **Global write** is gated by a new `GlobalPermissions.MANAGE_GLOBAL_PREFERENCES` enum value, checked **imperatively** in the `InfrahubGlobalPreferenceUpdate` resolver via `graphql_context.active_permissions.raise_for_permission(...)` (the `Branch`/global-permission idiom — `permissions/manager.py`). It is **not** wired through `get_global_permission_for_kind()` / the object-permission pipeline (that is schema-`Node`-specific and does not apply to a `StandardNode`). Because global permissions are regular `CoreGlobalPermission` nodes, this permission is assignable to any role through the existing permissions UI; `super_admin` bypasses it.
-- **Frontend gating signal.** Since there is no object permission on a `StandardNode`, the frontend cannot use `useGetObjectPermissions`. Instead the effective query returns a `can_edit_global_preferences` boolean (computed from `active_permissions`) that drives the "Organisation defaults" tab's visibility. The backend remains the source of truth — `InfrahubGlobalPreferenceUpdate` enforces the permission regardless of the flag.
+- **User preferences are private by construction.** No generic query, no account argument on reads/writes at `USER` scope — the resolver only ever touches `account_session.account_id`, so user A cannot read or write user B's preferences.
+- **The global scope (read *and* write)** is gated by the new `GlobalPermissions.MANAGE_GLOBAL_PREFERENCES`, checked **imperatively** via `active_permissions.raise_for_permission(...)` (the `Branch`/global-permission idiom, `permissions/manager.py`) — **not** through `get_global_permission_for_kind()` / the object-permission pipeline (that is schema-`Node`-specific and does not apply to a `StandardNode`). Assignable to any role via the existing permissions UI; `super_admin` bypasses. (The global *values* aren't secret — every user's `EFFECTIVE` view already reflects them — so gating the raw `GLOBAL` read is a "only managers touch the global scope directly" principle, not secrecy.)
+- **Frontend gating signal.** `StandardNode`s have no object permission, so the frontend can't use `useGetObjectPermissions`. Every read scope returns `can_edit_global_preferences` (from `active_permissions`) which hides/shows the Organisation-defaults surface. The backend is the source of truth regardless — the `GLOBAL`-scope read and write both enforce the permission.
 
 ## Frontend
 
 ### Data layer
 
-- A single TanStack Query hook `useEffectivePreferences()` in `frontend/app/src/entities/preferences/` reads the one `InfrahubEffectivePreferences` query and exposes a keyed, already-resolved map: `prefs.date_format` / `prefs.timezone` as `{ value, source }` (source `user`/`global`/`default`), plus `prefs.global` (raw org defaults for the org-editor) and `canEditGlobalPreferences`. Consumers read `value` + `source` directly — no comparing user-vs-global. A `source: "default"` value is `null`, so the consumer applies the browser value.
+- `useEffectivePreferences()` reads `InfrahubPreferences` (default `EFFECTIVE` scope) and exposes a keyed, already-resolved map: `prefs.date_format` / `prefs.timezone` as `{ value, source }` (source `user`/`global`/`default`) + `canEditGlobalPreferences`. Consumers read `value` + `source` directly — no comparing user-vs-global. A `source: "default"` value is `null`, so the consumer applies the browser value.
+- `useGlobalPreferences()` reads `InfrahubPreferences(scope: GLOBAL)` (raw org values) and is used *only* by the Organisation-defaults editor — so it edits the raw global, correct even for an admin who also has a personal override. Gated server-side by `manage_global_preferences`.
+- Writes go through `InfrahubSetPreferences(scope, …)`: the user card writes `scope: USER` (Automatic = explicit-null reset), the org card writes `scope: GLOBAL`. Success invalidates the effective query (and the global-scope query for org writes).
 - `useUpdateMyUserPreferences()` → calls `InfrahubUserPreferenceUpsert` (caller's own row; no account argument). "Reset to global" sends explicit `null` for the field(s) (there is no delete mutation).
 - `useUpdateGlobalPreferences()` → calls `InfrahubGlobalPreferenceUpdate`.
 - There is **no** generic read of another user's preferences and no generic CRUD mutation; reads go through the single effective query and writes through the two custom mutations above.
