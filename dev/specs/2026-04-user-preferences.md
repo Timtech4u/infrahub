@@ -186,9 +186,7 @@ Enforced imperatively at the single read + single write entry points, keyed on `
 - `useEffectivePreferences()` reads `InfrahubPreferences` (default `EFFECTIVE` scope) and exposes a keyed, already-resolved map: `prefs.date_format` / `prefs.timezone` as `{ value, source }` (source `user`/`global`/`default`) + `canEditGlobalPreferences`. Consumers read `value` + `source` directly — no comparing user-vs-global. A `source: "default"` value is `null`, so the consumer applies the browser value.
 - `useGlobalPreferences()` reads `InfrahubPreferences(scope: GLOBAL)` (raw org values) and is used *only* by the Organisation-defaults editor — so it edits the raw global, correct even for an admin who also has a personal override. Gated server-side by `manage_global_preferences`.
 - Writes go through `InfrahubSetPreferences(scope, …)`: the user card writes `scope: USER` (Automatic = explicit-null reset), the org card writes `scope: GLOBAL`. Success invalidates the effective query (and the global-scope query for org writes).
-- `useUpdateMyUserPreferences()` → calls `InfrahubUserPreferenceUpsert` (caller's own row; no account argument). "Reset to global" sends explicit `null` for the field(s) (there is no delete mutation).
-- `useUpdateGlobalPreferences()` → calls `InfrahubGlobalPreferenceUpdate`.
-- There is **no** generic read of another user's preferences and no generic CRUD mutation; reads go through the single effective query and writes through the two custom mutations above.
+- There is **no** generic read of another user's preferences and no generic CRUD mutation; reads go through `InfrahubPreferences(scope)` and writes through the single `InfrahubSetPreferences(scope, …)`.
 - All write hooks invalidate `useEffectivePreferences()` on success.
 - No `localStorage` dual-write.
 
