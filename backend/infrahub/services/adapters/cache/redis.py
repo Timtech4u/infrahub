@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import redis.asyncio as redis
 from redis import UsernamePasswordCredentialProvider
 
 from infrahub import config
 from infrahub.services.adapters.cache import InfrahubCache
-
-if TYPE_CHECKING:
-    from infrahub.message_bus.types import KVTTL
 
 
 class RedisCache(InfrahubCache):
@@ -55,8 +50,10 @@ class RedisCache(InfrahubCache):
 
         return [key.decode() for key in keys]
 
-    async def set(self, key: str, value: str, expires: KVTTL | None = None, not_exists: bool = False) -> bool | None:
-        return await self.connection.set(name=key, value=value, ex=expires.value if expires else None, nx=not_exists)
+    async def set(self, key: str, value: str, expires: int | None = None, not_exists: bool = False) -> bool | None:
+        # int() normalizes both plain ints and KVTTL (IntEnum) members to a value redis-py can encode.
+        ex = int(expires) if expires else None
+        return await self.connection.set(name=key, value=value, ex=ex, nx=not_exists)
 
     @classmethod
     async def new(cls) -> RedisCache:

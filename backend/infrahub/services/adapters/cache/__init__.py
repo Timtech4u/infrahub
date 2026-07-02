@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from infrahub.config import CacheDriver
-    from infrahub.message_bus.types import KVTTL
 
 
 class InfrahubCache(ABC):
@@ -33,8 +32,8 @@ class InfrahubCache(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def set(self, key: str, value: str, expires: KVTTL | None = None, not_exists: bool = False) -> bool | None:
-        """Set a value in the cache."""
+    async def set(self, key: str, value: str, expires: int | None = None, not_exists: bool = False) -> bool | None:
+        """Set a value in the cache, with an optional time-to-live in seconds."""
         raise NotImplementedError()
 
     @classmethod
