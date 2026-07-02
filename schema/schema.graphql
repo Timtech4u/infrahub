@@ -7448,12 +7448,6 @@ input DeleteInput {
   id: String
 }
 
-type DeliveryError {
-  message: String!
-  remediation: String!
-  status_class: String!
-}
-
 """An enumeration."""
 enum DiffAction {
   ADDED
@@ -25978,6 +25972,12 @@ enum TaskActionType {
   RETRY
 }
 
+type TaskError {
+  message: String!
+  remediation: String!
+  status_class: String!
+}
+
 type TaskInfo {
   id: String
 }
@@ -26004,6 +26004,10 @@ type TaskNode implements TaskNodeInterface {
   branch: String
   conclusion: String!
   created_at: String!
+  """
+  Classified failure reason with a remediation hint; null unless the task failed with one
+  """
+  error: TaskError
   id: String!
   logs: TaskLogEdge
   parameters: GenericScalar
@@ -26027,6 +26031,10 @@ interface TaskNodeInterface {
   branch: String
   conclusion: String!
   created_at: String!
+  """
+  Classified failure reason with a remediation hint; null unless the task failed with one
+  """
+  error: TaskError
   id: String!
   logs: TaskLogEdge
   parameters: GenericScalar
@@ -26114,7 +26122,10 @@ type WebhookDeliveryTask implements TaskNodeInterface {
   branch: String
   conclusion: String!
   created_at: String!
-  error: DeliveryError
+  """
+  Classified failure reason with a remediation hint; null unless the task failed with one
+  """
+  error: TaskError
   http_request: HttpRequest
   http_response: HttpResponse
   id: String!
